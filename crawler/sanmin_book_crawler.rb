@@ -13,6 +13,14 @@ class SanminBookCrawler
 
   SLEEP_INTERVAL = 0.3
 
+  ATTR_HASH = {
+    "ISBN13" => :isbn,
+    "ISBN10" => :isbn,
+    "ISBN" => :isbn,
+    "出版社" => :publisher,
+    "作者" => :author,
+  }
+
   def initialize
     @index_url = "http://www.m.sanmin.com.tw"
     # @start_urls = [
@@ -101,14 +109,14 @@ class SanminBookCrawler
 
         parse_page(doc)
         print "#{i}\n"
-      end if page_count > 1
+      end if page_count && page_count > 1
     end # end each start_category
 
     @books
   end
 
   def parse_page doc
-    names = doc.xpath('//td[@class="blue16"]//text()').map{ |d| d.to_s.strip }
+    names = doc.css('.ProdListTd .blue16 a').map{ |d| d.text.strip }
     green_spans = doc.css('span.green13')
 
     authors = (0...green_spans.count).select{|i| i%2 == 0}.map{|i| green_spans[i].text[0..-2] }
@@ -121,16 +129,22 @@ class SanminBookCrawler
 
     book_count = names.count
 
-    @books.concat( (0...book_count).map { |i|
-      {
-        name: names[i],
-        author: authors[i],
-        publisher: publishers[i],
-        external_image_url: external_image_urls[i],
-        url: urls[i],
-        price: prices[i]
-      }
-    })
+    threads = []
+    (0...book_count).each { |i|
+      threads << Thread.new do
+        book = {
+          name: names[i],
+          author: authors[i],
+          publisher: publishers[i],
+          external_image_url: external_image_urls[i],
+          url: urls[i],
+          price: prices[i]
+        }
+        book.each {|k, v| book[k] = nil if v && v.is_a?(String) && v.empty?}
+        @books << parse_detail(book)
+      end
+    }
+    ThreadsWait.all_waits(*threads)
   end
 
   def check_page_status doc
@@ -147,10 +161,57 @@ class SanminBookCrawler
     return 0
   end
 
+  def parse_detail book
+    r = curl_get book[:url]
+    doc = Nokogiri::HTML(r)
+
+    book[:name] ||= doc.css('.ProdName').text
+
+    doc.css('.ProdInfo li').map{|li| li.text.strip}.each{|attr_data|
+      key = attr_data.rpartition('：')[0]
+      book[ATTR_HASH[key]] = attr_data.rpartition('：')[-1] if ATTR_HASH[key]
+    }
+    book[:isbn] = isbn_to_13(book[:isbn]) if book[:isbn]
+    book[:external_image_url] ||= doc.xpath('//img[@class="SanminProdImg"]/@original').to_s
+
+    return book
+  end
+
   # 恩...你知道我也不是很想這樣做，反正他就這樣動了
   # 我也不知道要怎麼樣了，好歹他也是能跑了，就這樣吧
   def curl_get url
     %x(curl -s '#{url}' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8' -H 'Connection: keep-alive' -H 'Accept-Encoding: gzip, deflate, sdch' -H 'Accept-Language: en-US,en;q=0.8,zh-TW;q=0.6,zh;q=0.4,ja;q=0.2' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.134 Safari/537.36' --compressed)
+  end
+
+  def isbn_to_13 isbn
+    case isbn.length
+    when 13
+      return ISBN.thirteen isbn
+    when 10
+      return ISBN.thirteen isbn
+    when 12
+      return "#{isbn}#{isbn_checksum(isbn)}"
+    when 9
+      return ISBN.thirteen("#{isbn}#{isbn_checksum(isbn)}")
+    end
+  end
+
+  def isbn_checksum(isbn)
+    isbn.gsub!(/[^(\d|X)]/, '')
+    c = 0
+    if isbn.length <= 10
+      10.downto(2) {|i| c += isbn[10-i].to_i * i}
+      c %= 11
+      c = 11 - c
+      c ='X' if c == 10
+      return c
+    elsif isbn.length <= 13
+      (1..11).step(2) {|i| c += isbn[i].to_i}
+      c *= 3
+      (0..11).step(2) {|i| c += isbn[i].to_i}
+      c = (220-c) % 10
+      return c
+    end
   end
 end
 
