@@ -2,7 +2,7 @@ require 'crawler_rocks'
 require 'pry'
 require 'json'
 require 'iconv'
-require 'isbn'
+require 'book_toolkit'
 
 require 'thread'
 require 'thwait'
@@ -21,7 +21,10 @@ class SanminBookCrawler
     "作者" => :author,
   }
 
-  def initialize
+  def initialize update_progress: nil, after_each: nil
+    @update_progress_proc = update_progress
+    @after_each_proc = after_each
+
     @index_url = "http://www.m.sanmin.com.tw"
     # @start_urls = [
     #   "http://www.m.sanmin.com.tw/Product/Scheme1",
@@ -138,10 +141,15 @@ class SanminBookCrawler
           publisher: publishers[i],
           external_image_url: external_image_urls[i],
           url: urls[i],
-          price: prices[i]
+          original_price: prices[i],
+          known_supplier: 'sanmin'
         }
         book.each {|k, v| book[k] = nil if v && v.is_a?(String) && v.empty?}
-        @books << parse_detail(book)
+        parsed_book = parse_detail(book)
+
+        @after_each_proc.call(book: parsed_book) if @after_each_proc
+
+        @books << parsed_book
       end
     }
     ThreadsWait.all_waits(*threads)
@@ -171,7 +179,15 @@ class SanminBookCrawler
       key = attr_data.rpartition('：')[0]
       book[ATTR_HASH[key]] = attr_data.rpartition('：')[-1] if ATTR_HASH[key]
     }
-    book[:isbn] = isbn_to_13(book[:isbn]) if book[:isbn]
+
+    book[:invalid_isbn] = nil
+    begin
+      book[:isbn] = BookToolkit.to_isbn13(book[:isbn])
+    rescue Exception => e
+      book[:invalid_isbn] = book[:isbn]
+      book[:isbn] = nil
+    end
+
     book[:external_image_url] ||= doc.xpath('//img[@class="SanminProdImg"]/@original').to_s
 
     return book
@@ -182,38 +198,7 @@ class SanminBookCrawler
   def curl_get url
     %x(curl -s '#{url}' -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8' -H 'Connection: keep-alive' -H 'Accept-Encoding: gzip, deflate, sdch' -H 'Accept-Language: en-US,en;q=0.8,zh-TW;q=0.6,zh;q=0.4,ja;q=0.2' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.134 Safari/537.36' --compressed)
   end
-
-  def isbn_to_13 isbn
-    case isbn.length
-    when 13
-      return ISBN.thirteen isbn
-    when 10
-      return ISBN.thirteen isbn
-    when 12
-      return "#{isbn}#{isbn_checksum(isbn)}"
-    when 9
-      return ISBN.thirteen("#{isbn}#{isbn_checksum(isbn)}")
-    end
-  end
-
-  def isbn_checksum(isbn)
-    isbn.gsub!(/[^(\d|X)]/, '')
-    c = 0
-    if isbn.length <= 10
-      10.downto(2) {|i| c += isbn[10-i].to_i * i}
-      c %= 11
-      c = 11 - c
-      c ='X' if c == 10
-      return c
-    elsif isbn.length <= 13
-      (1..11).step(2) {|i| c += isbn[i].to_i}
-      c *= 3
-      (0..11).step(2) {|i| c += isbn[i].to_i}
-      c = (220-c) % 10
-      return c
-    end
-  end
 end
 
-cc = SanminBookCrawler.new
-File.write('sanmin_books.json', JSON.pretty_generate(cc.books))
+# cc = SanminBookCrawler.new
+# File.write('sanmin_books.json', JSON.pretty_generate(cc.books))
